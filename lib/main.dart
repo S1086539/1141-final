@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
-
+import 'package:intl/date_symbol_data_local.dart';
 // ---- 模型 ----
 
 class Weather {
@@ -220,31 +220,29 @@ class CwaWeatherAPI {
       // 一週預報
       List<DailyForecast> weekly = [];
       try {
-        final maxT = elements.firstWhere((e) => e['ElementName'] == '最高溫度')['Time'] as List;
-        final minT = elements.firstWhere((e) => e['ElementName'] == '最低溫度')['Time'] as List;
+        final maxTList = elements.firstWhere((e) => e['ElementName'] == '最高溫度')['Time'] as List;
+        final minTList = elements.firstWhere((e) => e['ElementName'] == '最低溫度')['Time'] as List;
         final descList = elements.firstWhere((e) => e['ElementName'] == '天氣預報綜合描述')['Time'] as List;
 
-        for (int i = 0; i < maxT.length; i++) {
-          String startTime = maxT[i]['StartTime'];
+        for (int i = 0; i < maxTList.length; i++) {
+          String startTime = maxTList[i]['StartTime'];
 
-          if (startTime.contains("06:00:00") || startTime.contains("12:00:00")) {
+          if (startTime.contains("06:00:00")) {
             DateTime date = DateTime.parse(startTime);
-            String dayRain = "0";
-            String fullDesc = descList[i]['ElementValue'][0]['WeatherDescription'] ?? "";
-
-            Match? match = RegExp(r"降雨機率(\d+)%").firstMatch(fullDesc);
-            dayRain = match?.group(1) ?? "0";
+            String dayDesc = descList[i]['ElementValue'][0]['WeatherDescription'] ?? "";
+            String dayRain = RegExp(r"降雨機率(\d+)%").firstMatch(dayDesc)?.group(1) ?? "0";
 
             weekly.add(DailyForecast(
               day: _getWeekDay(date),
-              maxTemp: maxT[i]['ElementValue'][0]['MaxTemperature'] ?? "--",
-              minTemp: (i < minT.length) ? minT[i]['ElementValue'][0]['MinTemperature'] : "--",
+              maxTemp: maxTList[i]['ElementValue'][0]['MaxTemperature'] ?? "--",
+              minTemp: (i < minTList.length) ? minTList[i]['ElementValue'][0]['MinTemperature'] : "--",
               rainChance: dayRain,
             ));
           }
-          if (weekly.length >= 7) break;
         }
-      } catch (e) { print("週預報解析詳細錯誤: $e"); }
+      } catch (e) {
+        print("週預報垂直列表解析出錯: $e");
+      }
 
       return Weather(
         cityName: formattedCity,
@@ -257,11 +255,9 @@ class CwaWeatherAPI {
         hourly: hourly,
         weekly: weekly,
       );
-    } on DioException catch (de) {
-      throw "網路連線失敗: ${de.message}";
     } catch (e) {
-      print("Debug 解析錯誤: $e");
-      throw "資料解析失敗";
+      print("解析錯誤細節: $e");
+      throw "資料讀取失敗，請稍後再試";
     }
   }
 
@@ -282,7 +278,11 @@ final weatherProvider = FutureProvider.family<Weather, String>((ref, city) async
 
 // ----  UI 介面 ----
 
-void main() => runApp(const ProviderScope(child: MyApp()));
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('zh_TW', null);
+  runApp(const ProviderScope(child: MyApp()));
+}
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -413,8 +413,10 @@ class HomePage extends ConsumerWidget {
                   ),
 
                   _SectionCard(
-                      title: '未來一周預報',
-                      child: Column(children: w.weekly.map((d) => _WeeklyRow(d)).toList())
+                    title: '未來一周預報',
+                    child: Column(
+                      children: w.weekly.map((d) => _WeeklyRow(d)).toList(),
+                    ),
                   ),
 
                   Padding(
@@ -605,26 +607,40 @@ class _WeeklyRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
       child: Row(
         children: [
           SizedBox(
-            width: 60,
-            child: Text(d.day, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+            width: 70,
+            child: Text(d.day, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           ),
-          const Icon(Icons.water_drop, size: 14, color: Colors.lightBlueAccent),
-          const SizedBox(width: 4),
+
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.water_drop, size: 16, color: Colors.lightBlueAccent),
+                const SizedBox(width: 4),
+                Text('${d.rainChance}%', style: const TextStyle(color: Colors.white70)),
+              ],
+            ),
+          ),
+
           SizedBox(
-            width: 40,
-            child: Text('${d.rainChance}%', style: const TextStyle(color: Colors.white70, fontSize: 13)),
+            width: 100,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Text('${d.minTemp}°', style: const TextStyle(color: Colors.white60, fontSize: 16)),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4),
+                  child: Text("/", style: TextStyle(color: Colors.white24)),
+                ),
+                Text('${d.maxTemp}°', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.orangeAccent)),
+              ],
+            ),
           ),
-          const Spacer(),
-          Text('${d.minTemp}°', style: const TextStyle(color: Colors.white60, fontSize: 16)),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 8),
-            child: Text("/", style: TextStyle(color: Colors.white24)),
-          ),
-          Text('${d.maxTemp}°', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         ],
       ),
     );
