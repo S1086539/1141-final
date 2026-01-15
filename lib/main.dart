@@ -450,7 +450,7 @@ class HomePage extends ConsumerWidget {
     Future.delayed(Duration.zero, () async {
       List<String> rainWarningList = [];
 
-      if (int.parse(currentCity.rainChance) >= 50) {
+      if (int.parse(currentCity.rainChance) >= 70) {
         rainWarningList.add(" ${currentCity.cityName}：${currentCity.rainChance}%");
       }
 
