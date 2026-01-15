@@ -1,164 +1,235 @@
 import 'package:flutter/material.dart';
-import 'package:audioplayers/audioplayers.dart';
-final player=AudioPlayer()..setReleaseMode(ReleaseMode.loop);
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:dio/dio.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:intl/intl.dart';
+
+// ------------------ 狀態管理 ------------------
+class Weather {
+  final String cityName;
+  final double temp;
+  final double feelsLike;
+  final double maxTemp;
+  final double minTemp;
+  final double wind;
+  final double pm25;
+  final int humidity;
+  final String description;
+  final List<HourlyData> hourly;
+  final List<DailyForecast> weekly;
+
+  Weather({
+    required this.cityName,
+    required this.temp,
+    required this.feelsLike,
+    required this.maxTemp,
+    required this.wind,
+    required this.pm25,
+    required this.humidity,
+    required this.minTemp,
+    required this.description,
+    required this.hourly,
+    required this.weekly,
+  });
+}
+
+class HourlyData {
+  final DateTime time;
+  final double temp;
+  HourlyData(this.time, this.temp);
+}
+
+class DailyForecast {
+  final String day;
+  final double maxTemp;
+  final double minTemp;
+  final int rainChance;
+  DailyForecast({required this.day, required this.maxTemp, required this.minTemp, required this.rainChance});
+}
+class LocationState {
+  final double lat;
+  final double lon;
+  final String? cityName;
+  final bool isGPS;
+  LocationState({required this.lat, required this.lon, this.cityName, this.isGPS = false});
+}
+
+final activeLocationProvider = StateProvider<LocationState>((ref) {
+  return LocationState(lat: 25.03, lon: 121.56, cityName: "台北市");
+});
+
+final pageIndexProvider = StateProvider<int>((ref) => 0);
+
+class FavoritesNotifier extends StateNotifier<List<String>> {
+  FavoritesNotifier() : super([]);
+  void toggleFavorite(String cityName) {
+    if (state.contains(cityName)) {
+      state = state.where((item) => item != cityName).toList();
+    } else {
+      state = [...state, cityName];
+    }
+  }
+}
+
+final favoritesProvider = StateNotifierProvider<FavoritesNotifier, List<String>>((ref) {
+  return FavoritesNotifier();
+});
+
+// ------------------ 主要 API Provider ------------------
+
+final weatherProvider = FutureProvider.family<Weather, LocationState>((ref, loc) async {
+  final dio = Dio();
+  const apiKey = 'fe9bb3ce4e9992e3edf23390035b4070';
+
+  final responses = await Future.wait([
+    dio.get('https://api.openweathermap.org/data/2.5/forecast?lat=${loc.lat}&lon=${loc.lon}&appid=$apiKey&units=metric&lang=zh_tw'),
+    dio.get('https://api.openweathermap.org/data/2.5/air_pollution?lat=${loc.lat}&lon=${loc.lon}&appid=$apiKey'),
+  ]);
+
+  final forecastData = responses[0].data;
+  final airData = responses[1].data;
+  final list = forecastData['list'] as List;
+  final current = list[0];
+
+  List<HourlyData> hourly = list.take(12).map((i) =>
+      HourlyData(DateTime.fromMillisecondsSinceEpoch(i['dt'] * 1000), (i['main']['temp'] as num).toDouble())
+  ).toList();
+
+  Map<String, List<double>> dailyTemps = {};
+  Map<String, double> dailyPop = {};
+  for (var item in list) {
+    String date = item['dt_txt'].split(' ')[0];
+    double t = (item['main']['temp'] as num).toDouble();
+    double p = (item['pop'] as num).toDouble();
+    dailyTemps.putIfAbsent(date, () => []).add(t);
+    if (p > (dailyPop[date] ?? 0)) dailyPop[date] = p;
+  }
+
+  List<DailyForecast> weekly = [];
+  var sortedDates = dailyTemps.keys.toList()..sort();
+  for (var date in sortedDates.take(5)) {
+    List<double> temps = dailyTemps[date]!;
+    weekly.add(DailyForecast(
+      day: (date == DateFormat('yyyy-MM-dd').format(DateTime.now())) ? "今天" : _getWeekDay(date),
+      maxTemp: temps.reduce((a, b) => a > b ? a : b),
+      minTemp: temps.reduce((a, b) => a < b ? a : b),
+      rainChance: (dailyPop[date]! * 100).toInt(),
+    ));
+  }
+
+  return Weather(
+    cityName: loc.isGPS ? (forecastData['city']?['name'] ?? "未知地點") : (loc.cityName ?? forecastData['city']?['name']),
+    temp: (current['main']?['temp'] as num?)?.toDouble() ?? 0.0,
+    feelsLike: (current['main']?['feels_like'] as num?)?.toDouble() ?? 0.0,
+    maxTemp: weekly.isNotEmpty ? weekly[0].maxTemp : 0.0,
+    minTemp: weekly.isNotEmpty ? weekly[0].minTemp : 0.0,
+    description: current['weather']?[0]?['description'] ?? "",
+    wind: (current['wind']?['speed'] as num?)?.toDouble() ?? 0.0,
+    pm25: (airData['list']?[0]?['components']?['pm2_5'] as num?)?.toDouble() ?? 0.0,
+    humidity: (current['main']?['humidity'] as num?)?.toInt() ?? 0,
+    hourly: hourly,
+    weekly: weekly,
+  );
+});
+
+// ------------------ UI 實作 ------------------
 
 void main() {
-  runApp(const MyApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const ProviderScope(child: MyApp()));
 }
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF08203E),
       ),
-      home: const MyHomePage(),
+      home: const MainScaffold(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key});
+class MainScaffold extends ConsumerWidget {
+  const MainScaffold({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
-}
+  Widget build(BuildContext context, WidgetRef ref) {
+    final index = ref.watch(pageIndexProvider);
 
-class _MyHomePageState extends State<MyHomePage> {
-
-  final tabs=[
-    Screen1(),
-    Screen2(),
-    Screen3(),
-    Screen4(),
-  ];
-
-  int previousIndex=0;
-  int currentIndex=0;
-
-  @override
-  Widget build(BuildContext context) {
-    if (currentIndex==0) player.play(AssetSource("1.mp3"));
     return Scaffold(
-      appBar: AppBar(
-        title: Text("我的自傳"),
-        centerTitle: true,
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+      body: IndexedStack(
+        index: index,
+        children: const [
+          HomePage(),
+          OverviewPage(),
+        ],
       ),
-      body: tabs[currentIndex],
-      bottomNavigationBar: BottomNavigationBar(
-                             type: BottomNavigationBarType.fixed,
-                             backgroundColor: Colors.blue,
-                             selectedItemColor: Colors.white,
-                             selectedFontSize: 18,
-                             unselectedFontSize: 14,
-                             iconSize: 30,
-                             currentIndex: currentIndex,
-                             items: [
-                               BottomNavigationBarItem(icon: currentIndex==0? Image.asset('assets/a1.jpg', width: 40, height: 40,):Image.asset('assets/a11.png', width: 30, height: 30,), label:"自我介紹",),
-                               BottomNavigationBarItem(icon: currentIndex==1? Image.asset('assets/a2.png', width: 40, height: 40,):Image.asset('assets/a21.png', width: 30, height: 30,), label:"學習歷程",),
-                               BottomNavigationBarItem(icon: currentIndex==2? Image.asset('assets/a3.jpg', width: 40, height: 40,):Image.asset('assets/a31.jpg', width: 30, height: 30,), label:"學習計畫",),
-                               BottomNavigationBarItem(icon: currentIndex==3? Image.asset('assets/a4.png', width: 40, height: 40,):Image.asset('assets/a41.png', width: 30, height: 30,), label:"專業方向",),
-                             ],
-                             onTap: (index) {
-                               setState(() {
-                                 previousIndex=currentIndex;
-                                 currentIndex=index;
-                                 if (index==0) {
-                                    if (previousIndex==currentIndex) player.resume();
-                                    player.stop();
-                                    player.play(AssetSource("1.mp3"));
-                                 }
-                                 if (index==1) {
-                                   if (previousIndex==currentIndex) player.resume();
-                                   player.stop();
-                                   player.play(AssetSource("2.mp3"));
-                                 }
-                                 if (index==2) {
-                                   if (previousIndex==currentIndex) player.resume();
-                                   player.stop();
-                                   player.play(AssetSource("3.mp3"));
-                                 }
-                                 if (index==3) {
-                                   if (previousIndex==currentIndex) player.resume();
-                                   player.stop();
-                                   player.play(AssetSource("4.mp3"));
-                                 }
-                               });
-                             },
-                           ),
+      bottomNavigationBar: BottomAppBar(
+        color: Colors.black.withValues(alpha: 0.5),
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              // 左下角：三條線符號
+              IconButton(
+                icon: const Icon(Icons.menu, color: Colors.white, size: 28),
+                onPressed: () => ref.read(pageIndexProvider.notifier).state = 1,
+              ),
+              // 右下角：搜尋功能
+              IconButton(
+                icon: const Icon(Icons.search, color: Colors.white, size: 28),
+                onPressed: () => _showSearchDialog(context, ref),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
-}
 
-
-class Screen1 extends StatelessWidget {
-  Screen1({super.key});
-
-  final String s1 = "我出生在雲林的一個純樸小鄉村，父親從事農業，母親原本是會計師，在結婚後選擇辭職與父親一同經營農場。自我有記憶以來，父母總是忙於農務，清晨出門、深夜才回家，因此照顧我與姐姐的責任便落在奶奶身上。奶奶雖然文化程度不高，但總是以最簡單卻最深刻的方式教導我們兩件事：第一，無論如何都要照顧好身體，因為「身體若倒了，什麼事情都沒有辦法做」；第二，遇到不懂的事要勇敢向他人請教，不分年紀、性別，只要是好的、正向的知識，都要有「敢開口」的勇氣。這些教誨一直伴隨我成長，也成為我面對困難時最重要的信念。""在小學階段的我個性外向、活潑，常常參加各式各樣的校外比賽，也投入校內的藝術社團。課業表現雖稱不上頂尖，但一直保持穩定、認真。升上國中後，我意外被分入資優班。初進新環境時，由於班級競爭氣氛強烈，加上與同學不熟悉，使得原本外向的我變得較為內斂。然而，隨著彼此在課業上的切磋與合作，我慢慢找回學習的熱忱，國中三年也始終維持在中上程度。""接觸資訊領域是一次意想不到的契機。當時學校有名額有限的聯合社團可以申請，而因為我變得較被動，沒有主動報名。直到同學向我分享參與的內容與收穫，我才第一次真正對資訊產生興趣。於是，在填寫高中志願時，我將具有資訊科的學校排在前幾志願之中。雖然最後未能順利進入資訊科，而是錄取台中高工電子科，但我仍努力適應新環境。""國中念女校，高中一下子進入幾乎全新的氣氛與文化，使我一度相當不適應。然而我始終在課業上盡全力學習，在眾多科目中，我最喜歡的課程是「數位邏輯」。這門課不依賴複雜公式，而是透過推理與結構化思考就能得出答案。這讓我感受到「思考」本身的魅力，也再次喚起我對資訊領域的興趣與信心。""回頭看這段求學歷程，從鄉村長大的踏實，到資優班磨練出的學習態度，再到電子科重新適應新環境的勇氣，這些經驗都讓我學會更加自律、更加堅持，也更加願意主動追求知識。我相信，這些特質將成為我未來繼續成長與挑戰自我的重要基礎。";
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      child: Column(
-        children: [
-          //標題
-          const Padding(
-            padding: EdgeInsets.fromLTRB(30, 20, 30, 20),
-            child: Text("Who am I",
-              style: TextStyle(
-                fontSize: 32,
-                fontWeight: FontWeight.bold,
-                color: Colors.pinkAccent,
-              ),
-            ),
-          ),
-          Container(
-            padding: const EdgeInsets.all(20),
-            margin: const EdgeInsets.fromLTRB(30, 0, 30, 30),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [
-                  Color(0xFFFEEBFD),
-                  Color(0xFFE1F5FE),
-                  Color(0xFFE0F7FA),
-                ],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              border: Border.all(color: Colors.pink.shade100, width: 3),
-              borderRadius: BorderRadius.circular(10),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.pink.shade50.withOpacity(0.8),
-                  offset: const Offset(6, 6),
-                  blurRadius: 8,
-                ),
-              ],
-            ),
-            child: Text(s1, style: const TextStyle(fontSize: 20, color: Colors.black87)),
-          ),
-          const SizedBox(height: 15),
-
-          Container(
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [
-                  Color(0xFFFFE0B2),
-                  Color(0xFFD1C4E9),
-                ],
-                begin: Alignment.bottomLeft,
-                end: Alignment.topRight,
-              ),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Image.asset('assets/a1.jpg'),
-            width: 200,
-            height: 200,
+  void _showSearchDialog(BuildContext context, WidgetRef ref) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1e3c72),
+        title: const Text("搜尋城鎮"),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: "請輸入城市名稱"),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("取消", style: TextStyle(color: Colors.white70))),
+          TextButton(
+            onPressed: () async {
+              final city = controller.text;
+              if (city.isEmpty) return;
+              try {
+                final res = await Dio().get("http://api.openweathermap.org/geo/1.0/direct?q=$city&limit=1&appid=fe9bb3ce4e9992e3edf23390035b4070");
+                if (res.data.isNotEmpty) {
+                  final data = res.data[0];
+                  ref.read(activeLocationProvider.notifier).state = LocationState(
+                      lat: data['lat'],
+                      lon: data['lon'],
+                      cityName: data['local_names']?['zh'] ?? data['name'],
+                      isGPS: false
+                  );
+                  ref.read(pageIndexProvider.notifier).state = 0;
+                  Navigator.pop(ctx);
+                }
+              } catch (e) {
+                print(e);
+              }
+            },
+            child: const Text("搜尋", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -166,473 +237,333 @@ class Screen1 extends StatelessWidget {
   }
 }
 
-class Screen2 extends StatelessWidget {
-  const Screen2({super.key});
-
-  final List<Map<String, dynamic>> historyData = const [
-    {
-      'year': '2024',
-      'title': '大學課程：人工智慧與大型語言模型（LLM）',
-      'description':
-      '修習人工智慧概論與 LLM 相關課程，理解 Transformer、RNN、注意力機制等基礎概念，並使用開源模型進行簡易文本分類與推論練習，奠定 AI 領域的基礎能力。',
-      'skills': ['LLM 基礎', 'AI 概論', 'Python', '資料前處理'],
-    },
-    {
-      'year': '2023',
-      'title': '大學課程：Java 程式設計與物件導向開發',
-      'description':
-      '完成 Java 物件導向課程，熟悉類別、繼承、多型與例外處理等觀念，並以小組專題實作一個基本的資料管理系統，加強程式架構與系統化思考能力。',
-      'skills': ['Java', 'OOP', '軟體架構', 'Git 協作'],
-    },
-    {
-      'year': '2022',
-      'title': '大學課程：C 語言與底層程式設計',
-      'description':
-      '透過 C 語言課程建立紮實的程式基礎，理解指標、記憶體管理與結構體等核心概念，並完成多個課內小專案如迷宮遊戲與資料排序工具。',
-      'skills': ['C 語言', '記憶體觀念', '資料結構基礎'],
-    },
-    {
-      'year': '2019.09',
-      'title': '高中電子科：邏輯電路與資訊興趣萌芽',
-      'description':
-      '在電子科課程中接觸數位邏輯，因其強調推理與邏輯思考而開始真正產生興趣，也在課餘自學 Python 入門作為之後資訊領域探索的第一步。',
-      'skills': ['數位邏輯', 'Python 入門', '自主學習能力'],
-    },
-  ];
+// --- 首頁 ---
+class HomePage extends ConsumerWidget {
+  const HomePage({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          '我的學習歷程',
-          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.pinkAccent),
-        ),
-        backgroundColor: const Color(0xFFFEEBFD),
-        elevation: 0,
-      ),
-      body: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final loc = ref.watch(activeLocationProvider);
+    final weatherAsync = ref.watch(weatherProvider(loc));
+    final favorites = ref.watch(favoritesProvider);
+
+    return weatherAsync.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (err, _) => Center(child: Text('連線錯誤: $err')),
+      data: (weather) => Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [Color(0xFFE0F7FA), Color(0xFFFEEBFD)],
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
+            colors: [Color(0xFF0F2027), Color(0xFF203A43), Color(0xFF2C5364)],
           ),
         ),
-        child: ListView.builder(
-          itemCount: historyData.length,
-          itemBuilder: (context, index) {
-            final item = historyData[index];
-            return TimelineItem(
-              year: item['year']!,
-              title: item['title']!,
-              description: item['description']!,
-              skills: item['skills'] as List<String>,
-              isFirst: index == 0,
-              isLast: index == historyData.length - 1,
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
-class TimelineItem extends StatelessWidget {
-  final String year;
-  final String title;
-  final String description;
-  final List<String> skills;
-  final bool isFirst;
-  final bool isLast;
-
-  const TimelineItem({
-    required this.year,
-    required this.title,
-    required this.description,
-    required this.skills,
-    this.isFirst = false,
-    this.isLast = false,
-    super.key,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // 左側：時間軸線和圓點
-        Column(
-          children: [
-            // 上半部線條
-            Container(
-              width: 2,
-              height: isFirst ? 10 : 40,
-              color: isFirst ? Colors.transparent : Colors.pink.shade200,
+        child: Scaffold(
+          backgroundColor: Colors.transparent,
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            leading: IconButton(
+              icon: const Icon(Icons.my_location),
+              onPressed: () async {
+                try {
+                  Position pos = await _determinePosition();
+                  ref.read(activeLocationProvider.notifier).state = LocationState(lat: pos.latitude, lon: pos.longitude, isGPS: true);
+                } catch (e) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+                }
+              },
             ),
-            // 時間節點圓點
-            Container(
-              width: 12,
-              height: 12,
-              decoration: BoxDecoration(
-                color: Colors.pinkAccent,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
+            actions: [
+              IconButton(
+                icon: Icon(
+                  favorites.contains(weather.cityName) ? Icons.bookmark : Icons.add_circle_outline,
+                  color: Colors.white,
+                  size: 28,
+                ),
+                onPressed: () {
+                  ref.read(favoritesProvider.notifier).toggleFavorite(weather.cityName);
+                  final isAdded = !favorites.contains(weather.cityName);
+                  ScaffoldMessenger.of(context).clearSnackBars();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(isAdded ? "✅ 已加入關注：${weather.cityName}" : "❌ 已移除關注：${weather.cityName}"),
+                      duration: const Duration(seconds: 10),
+                      behavior: SnackBarBehavior.floating,
+                      action: SnackBarAction(label: "確定", textColor: Colors.yellow, onPressed: () {}),
+                    ),
+                  );
+                },
               ),
-            ),
-            // 下半部線條
-            Container(
-              width: 2,
-              height: isLast ? 10 : 80,
-              color: isLast ? Colors.transparent : Colors.pink.shade200,
-            ),
-          ],
-        ),
-        const SizedBox(width: 20),
-
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
-            child: Card(
-              color: Colors.white,
-              elevation: 4,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(15),
-                side: BorderSide(color: Colors.pink.shade100, width: 1),
+            ],
+          ),
+          body: CustomScrollView(
+            slivers: [
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 40),
+                  child: Column(
+                    children: [
+                      Text(weather.cityName, style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 10),
+                      Text('${weather.temp.toInt()}°', style: const TextStyle(fontSize: 100, fontWeight: FontWeight.w100)),
+                      Text(weather.description, style: const TextStyle(fontSize: 22, color: Colors.white70)),
+                      Text('最高 ${weather.maxTemp.toInt()}°  最低 ${weather.minTemp.toInt()}°', style: const TextStyle(fontSize: 16)),
+                    ],
+                  ),
+                ),
               ),
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              SliverToBoxAdapter(
+                child: _SectionCard(
+                  title: '每小時天氣預報',
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          height: 80,
+                          width: weather.hourly.length * 70.0,
+                          child: _WeatherChart(weather.hourly),
+                        ),
+                        Row(children: weather.hourly.map((h) => _HourlyItem(h)).toList()),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: _SectionCard(
+                  title: '未來 5 日預報',
+                  child: Column(children: weather.weekly.map((w) => _WeeklyRow(w)).toList()),
+                ),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.all(16),
+                sliver: SliverGrid.count(
+                  crossAxisCount: 2,
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                  childAspectRatio: 2.0,
                   children: [
-                    // 時間標籤
-                    Text(
-                      year,
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                          color: Colors.pink.shade400),
-                    ),
-                    const SizedBox(height: 8),
-
-                    // 標題
-                    Text(
-                      title,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 18),
-                    ),
-                    const SizedBox(height: 10),
-
-                    Text(description, style: const TextStyle(fontSize: 16)),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 8.0,
-                      runSpacing: 4.0,
-                      children: skills.map((skill) => Chip(
-                        label: Text(skill, style: const TextStyle(fontSize: 12, color: Colors.white)),
-                        backgroundColor: Colors.blueAccent.shade200,
-                      )).toList(),
-                    ),
+                    _InfoBox(label: '風速', value: '${weather.wind} m/s', icon: Icons.air),
+                    _InfoBox(label: 'PM2.5', value: '${weather.pm25}', icon: Icons.grain),
+                    _InfoBox(label: '空氣濕度', value: '${weather.humidity}%', icon: Icons.water_drop),
+                    _InfoBox(label: '能見度', value: '10 km', icon: Icons.visibility),
                   ],
                 ),
               ),
-            ),
+              const SliverToBoxAdapter(child: SizedBox(height: 30)),
+            ],
           ),
         ),
-      ],
+      ),
     );
   }
 }
 
-class Screen3 extends StatelessWidget {
-  const Screen3({super.key});
-  final List<Map<String, dynamic>> studyPlan = const [
-    {
-      'period': '大一時期',
-      'color': Colors.blue,
-      'goals': [
-        {'task': '建立程式基礎：學好 C 與 Java 語言', 'progress': 0.8},
-        {'task': '奠定 AI/LLM 概念，完成至少 1 個課堂小專案', 'progress': 0.7},
-        {'task': '加強英文閱讀能力（能閱讀技術文件）', 'progress': 0.65},
-        {'task': '培養自學習慣，固定練習 LeetCode / 基礎演算法', 'progress': 0.75},
-      ],
-    },
-    {
-      'period': '大二時期',
-      'color': Colors.pink,
-      'goals': [
-        {'task': '完成進階 Java / Python 作品，強化程式架構能力', 'progress': 0.8},
-        {'task': '開始接觸 Web/App 技術（Flutter 或前端框架）', 'progress': 0.7},
-        {'task': '修習資料結構與演算法強化課程', 'progress': 0.75},
-        {'task': '探索資訊方向（AI、後端、前端等），確立未來方向', 'progress': 0.6},
-      ],
-    },
-    {
-      'period': '大三時期',
-      'color': Colors.pinkAccent,
-      'goals': [
-        {'task': '整合 LLM / 後端 / App 等能力，製作完整專題作品', 'progress': 0.8},
-        {'task': '開始準備研究所或求職（履歷、作品集、面試準備）', 'progress': 0.7},
-        {'task': '學習雲端運算 (AWS / GCP) 並完成至少一個部署練習', 'progress': 0.6},
-        {'task': '完成畢業專題初版並持續迭代優化', 'progress': 0.8},
-      ],
-    },
-  ];
+// --- 概覽頁面 ---
+class OverviewPage extends ConsumerWidget {
+  const OverviewPage({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final favorites = ref.watch(favoritesProvider);
+
     return Scaffold(
+      backgroundColor: const Color(0xFF08203E),
       appBar: AppBar(
-        title: const Text(
-          '未來學習規劃',
-          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueAccent),
-        ),
-        backgroundColor: const Color(0xFFE0F7FA),
+        title: const Text("關注的城鎮", style: TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.transparent,
         elevation: 0,
-      ),
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFFFEEBFD), Color(0xFFE0F7FA)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(15.0),
-          child: Column(
-            children: studyPlan.map((plan) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 12.0),
-                child: buildGoalExpansionTile(plan),
-              );
-            }).toList(),
-          ),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios),
+          onPressed: () => ref.read(pageIndexProvider.notifier).state = 0,
         ),
       ),
-    );
-  }
-
-  // 建立 ExpansionTile Widget
-  Widget buildGoalExpansionTile(Map<String, dynamic> plan) {
-    List<Map<String, dynamic>> goals = plan['goals'] as List<Map<String, dynamic>>;
-    Color primaryColor = plan['color'] as Color;
-
-    return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: primaryColor.withOpacity(0.3), width: 2),
-      ),
-      child: ExpansionTile(
-        initiallyExpanded: plan['period'].contains('大一'),
-        title: Text(
-          plan['period'] as String,
-          style: TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-            color: primaryColor,
-          ),
-        ),
-        children: goals.map((goal) {
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 8.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  goal['task'] as String,
-                  style: const TextStyle(fontSize: 16, color: Colors.black87),
+      body: favorites.isEmpty
+          ? const Center(child: Text("尚未關注任何城市", style: TextStyle(color: Colors.white54, fontSize: 18)))
+          : ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: favorites.length,
+        itemBuilder: (context, index) {
+          final cityName = favorites[index];
+          return GestureDetector(
+            onTap: () async {
+              // 點擊卡片跳轉
+              final res = await Dio().get("http://api.openweathermap.org/geo/1.0/direct?q=$cityName&limit=1&appid=fe9bb3ce4e9992e3edf23390035b4070");
+              if (res.data.isNotEmpty) {
+                ref.read(activeLocationProvider.notifier).state = LocationState(
+                    lat: res.data[0]['lat'],
+                    lon: res.data[0]['lon'],
+                    cityName: cityName,
+                    isGPS: false
+                );
+                ref.read(pageIndexProvider.notifier).state = 0;
+              }
+            },
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF1e3c72), Color(0xFF2a5298)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-                const SizedBox(height: 5),
-                // 進度條
-                LinearProgressIndicator(
-                  value: goal['progress'] as double,
-                  backgroundColor: Colors.grey.shade300,
-                  color: primaryColor.withOpacity(0.8),
-                  borderRadius: BorderRadius.circular(5),
-                ),
-                const SizedBox(height: 15),
-              ],
+                borderRadius: BorderRadius.circular(25),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 10, offset: const Offset(0, 5))],
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(cityName, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
+                      const SizedBox(height: 5),
+                      Text(DateFormat('MM月dd日 EEEE', 'zh_TW').format(DateTime.now()), style: const TextStyle(color: Colors.white70)),
+                    ],
+                  ),
+                  const Icon(Icons.wb_cloudy, size: 50, color: Colors.white),
+                ],
+              ),
             ),
           );
-        }).toList(),
+        },
       ),
     );
   }
 }
 
-const int _kapokRedPrimary = 0xFFE44534;
-const MaterialColor KapokRed = MaterialColor(
-  _kapokRedPrimary,
-  <int, Color>{
-    50: Color(0xFFFAEBEB),
-    100: Color(0xFFF5B6B3),
-    200: Color(0xFFEE8A85),
-    300: Color(0xFFE85F56),
-    400: Color(0xFFE44534),
-    500: Color(_kapokRedPrimary),
-    600: Color(0xFFD93B2B),
-    700: Color(0xFFC73325),
-    800: Color(0xFFB52A1E),
-    900: Color(0xFF901C12),
-  },
-);
+// ------------------ 輔助組件 ------------------
 
-class Screen4 extends StatelessWidget {
-  const Screen4({super.key});
-  final List<Map<String, dynamic>> domains = const [
-    {
-      'title': '前端與移動開發',
-      'description': '專注於使用者介面設計、交互邏輯與跨平台應用開發。',
-      'interest_level': 0.85,
-      'color': Colors.blueAccent,
-      'keywords': ['Flutter', 'Dart', 'UI/UX', 'API Integration'],
-    },
-    {
-      'title': '數據科學與機器學習',
-      'description': '學習數據分析、演算法設計，並應用於解決實際問題。',
-      'interest_level': 0.75,
-      'color': Colors.green,
-      'keywords': ['Python', 'TensorFlow', 'Pandas', '線性代數'],
-    },
-    {
-      'title': '後端與系統架構',
-      'description': '鑽研伺服器端邏輯、資料庫設計、雲端服務與系統擴展性。',
-      'interest_level': 0.60,
-      'color': Colors.orange,
-      'keywords': ['Node.js', 'Firebase', 'SQL', '系統設計'],
-    },
-    {
-      'title': '硬體與計算機原理',
-      'description': '深入理解計算機底層運作原理、作業系統與網路基礎。',
-      'interest_level': 0.70,
-      'color': Colors.purple,
-      'keywords': ['計算機組織', '作業系統', '網路協定', 'C/C++'],
-    },
-  ];
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          '我的專業方向',
-          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo),
-        ),
-        backgroundColor: const Color(0xFFE0F7FA),
-        elevation: 0,
-      ),
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFFFEEBFD), Color(0xFFE0F7FA)],
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-          ),
-        ),
-        child: ListView(
-          padding: const EdgeInsets.all(15.0),
-          children: domains.map((domain) {
-            return DomainCard(
-              title: domain['title'] as String,
-              description: domain['description'] as String,
-              level: domain['interest_level'] as double,
-              color: domain['color'] as Color,
-              keywords: domain['keywords'] as List<String>,
-            );
-          }).toList(),
-        ),
-      ),
-    );
-  }
-}
-
-class DomainCard extends StatelessWidget {
+class _SectionCard extends StatelessWidget {
   final String title;
-  final String description;
-  final double level;
-  final Color color;
-  final List<String> keywords;
-
-  const DomainCard({
-    required this.title,
-    required this.description,
-    required this.level,
-    required this.color,
-    required this.keywords,
-    super.key,
-  });
-
+  final Widget child;
+  const _SectionCard({required this.title, required this.child});
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 15),
-      elevation: 6,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(15),
-        side: BorderSide(color: color.withOpacity(0.3), width: 2),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 80,
-              height: 80,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  CircularProgressIndicator(
-                    value: level,
-                    strokeWidth: 8,
-                    backgroundColor: Colors.grey.shade200,
-                    valueColor: AlwaysStoppedAnimation<Color>(color),
-                  ),
-                  Text(
-                    '${(level * 100).toInt()}%',
-                    style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                        color: color),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 15),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF006466),
-                    ),
-                  ),
-                  const SizedBox(height: 5),
-                  Text(
-                    description,
-                    style: const TextStyle(fontSize: 14, color: Colors.black87),
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 6.0,
-                    runSpacing: 4.0,
-                    children: keywords.map((keyword) => Chip(
-                      label: Text(keyword, style: const TextStyle(fontSize: 11, color: Colors.white)),
-                      backgroundColor: KapokRed,
-                    )).toList(),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(20)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(color: Colors.white70, fontSize: 14)),
+          const Divider(color: Colors.white24),
+          child,
+        ],
       ),
     );
   }
+}
+
+class _WeatherChart extends StatelessWidget {
+  final List<HourlyData> data;
+  const _WeatherChart(this.data);
+  @override
+  Widget build(BuildContext context) {
+    if (data.isEmpty) return const SizedBox.shrink();
+    final temps = data.map((e) => e.temp).toList();
+    final minT = temps.reduce((a, b) => a < b ? a : b) - 2;
+    final maxT = temps.reduce((a, b) => a > b ? a : b) + 2;
+    return LineChart(LineChartData(
+      minY: minT, maxY: maxT,
+      gridData: const FlGridData(show: false),
+      titlesData: const FlTitlesData(show: false),
+      borderData: FlBorderData(show: false),
+      lineBarsData: [
+        LineChartBarData(
+          spots: data.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value.temp)).toList(),
+          isCurved: true, color: Colors.white, barWidth: 3, dotData: const FlDotData(show: false),
+          belowBarData: BarAreaData(show: true, gradient: LinearGradient(
+            colors: [Colors.white.withValues(alpha: 0.3), Colors.transparent],
+            begin: Alignment.topCenter, end: Alignment.bottomCenter,
+          )),
+        ),
+      ],
+    ));
+  }
+}
+
+class _HourlyItem extends StatelessWidget {
+  final HourlyData h;
+  const _HourlyItem(this.h);
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 70,
+      child: Column(
+        children: [
+          Text(DateFormat('HH:mm').format(h.time), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+          const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Icon(Icons.cloud, color: Colors.white, size: 20)),
+          Text('${h.temp.toInt()}°', style: const TextStyle(fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+}
+
+class _WeeklyRow extends StatelessWidget {
+  final DailyForecast w;
+  const _WeeklyRow(this.w);
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Expanded(flex: 2, child: Text(w.day, style: const TextStyle(fontSize: 16))),
+          Expanded(flex: 3, child: Row(children: [
+            const Icon(Icons.water_drop, size: 14, color: Colors.blueAccent),
+            Text(' ${w.rainChance}%', style: const TextStyle(color: Colors.blueAccent)),
+            const SizedBox(width: 10),
+            const Icon(Icons.wb_sunny, color: Colors.orange, size: 20),
+          ])),
+          Text('${w.maxTemp.toInt()}°  ${w.minTemp.toInt()}°', style: const TextStyle(fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+}
+
+class _InfoBox extends StatelessWidget {
+  final String label;
+  final String value;
+  final IconData icon;
+  const _InfoBox({required this.label, required this.value, required this.icon});
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(15)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(children: [Icon(icon, size: 16, color: Colors.white70), const SizedBox(width: 5), Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12))]),
+          Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+}
+
+// ------------------ 核心功能 ------------------
+
+String _getWeekDay(String date) {
+  return DateFormat('EEEE', 'zh_TW').format(DateTime.parse(date)).replaceAll('星期', '週');
+}
+
+Future<Position> _determinePosition() async {
+  bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+  if (!serviceEnabled) return Future.error('定位服務未開啟');
+  LocationPermission permission = await Geolocator.checkPermission();
+  if (permission == LocationPermission.denied) {
+    permission = await Geolocator.requestPermission();
+    if (permission == LocationPermission.denied) return Future.error('權限被拒絕');
+  }
+  return await Geolocator.getCurrentPosition();
 }
