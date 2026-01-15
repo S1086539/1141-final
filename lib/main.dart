@@ -2,76 +2,141 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 
-// ----模型 ----
+// ---- 模型 ----
 
 class Weather {
   final String cityName;
-  final double temp;
-  final double feelsLike;
-  final double maxTemp;
-  final double minTemp;
-  final double wind;
-  final double pm25;
-  final int humidity;
+  final String temp;
   final String description;
+  final String rainChance;
+  final String humidity;
+  final String feelsLike;
+  final String wind;
   final List<HourlyData> hourly;
   final List<DailyForecast> weekly;
 
   Weather({
-    required this.cityName, required this.temp, required this.feelsLike,
-    required this.maxTemp, required this.wind, required this.pm25,
-    required this.humidity, required this.minTemp, required this.description,
-    required this.hourly, required this.weekly,
+    required this.cityName, required this.temp, required this.description,
+    required this.rainChance, required this.humidity, required this.feelsLike,
+    required this.wind, required this.hourly, required this.weekly,
   });
 }
 
 class HourlyData {
   final DateTime time;
-  final double temp;
-  HourlyData(this.time, this.temp);
+  final String temp;
+  final String wx;
+  HourlyData(this.time, this.temp, this.wx);
 }
 
 class DailyForecast {
   final String day;
-  final double maxTemp;
-  final double minTemp;
-  final int rainChance;
+  final String maxTemp;
+  final String minTemp;
+  final String rainChance;
   DailyForecast({required this.day, required this.maxTemp, required this.minTemp, required this.rainChance});
 }
 
 class LocationState {
-  final double lat;
-  final double lon;
-  final String? cityName;
-  final bool isGPS;
-  LocationState({required this.lat, required this.lon, this.cityName, this.isGPS = false});
+  final String cityName;
+  LocationState({required this.cityName});
 }
+class WeatherVisuals {
+  final IconData icon;
+  final List<Color> bgColors;
+  final String animationPath;
 
-// ---狀態管理  ---
+  WeatherVisuals({required this.icon, required this.bgColors, this.animationPath = ""});
 
+  static WeatherVisuals getVisuals(String description) {
+    if (description.contains('雨')) {
+      return WeatherVisuals(
+          icon: Icons.umbrella,
+          bgColors: [const Color(0xFF203A43), const Color(0xFF2C5364)]
+      );
+    } else if (description.contains('雲') || description.contains('陰')) {
+      return WeatherVisuals(
+          icon: Icons.cloud,
+          bgColors: [const Color(0xFF616161), const Color(0xFF9BC5C3)]
+      );
+    } else {
+      return WeatherVisuals(
+          icon: Icons.wb_sunny,
+          bgColors: [const Color(0xFF2980B9), const Color(0xFF6DD5FA)]
+      );
+    }
+  }
+}
+// --狀態--
 final activeLocationProvider = NotifierProvider<ActiveLocationNotifier, LocationState>(() {
   return ActiveLocationNotifier();
 });
 
 class ActiveLocationNotifier extends Notifier<LocationState> {
   @override
-  LocationState build() => LocationState(lat: 25.03, lon: 121.56, cityName: "台北市");
+  LocationState build() {
+    Future.microtask(() => updateToCurrentLocation());
+    return LocationState(cityName: "臺北市");
+  }
 
-  void updateLocation(LocationState newState) => state = newState;
+  void updateLocation(String city) => state = LocationState(cityName: city);
+
+  Future<void> updateToCurrentLocation() async {
+    try {
+      //定位服務是否開啟
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return;
+
+      // 權限
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) return;
+      }
+
+      if (permission == LocationPermission.deniedForever) return;
+
+      //獲取位置
+      Position pos = await Geolocator.getCurrentPosition();
+      final res = await Dio().get(
+        'https://nominatim.openstreetmap.org/reverse',
+        queryParameters: {
+          'lat': pos.latitude,
+          'lon': pos.longitude,
+          'format': 'json',
+          'accept-language': 'zh-TW',
+        },
+        options: Options(headers: {
+          'User-Agent': 'MyWeatherApp/1.0',
+        }),
+      );
+
+      String? city = res.data['address']['city'] ?? res.data['address']['county'] ?? res.data['address']['state'];
+      print("定位原始結果: $city");
+      if (city != null) {
+        city = city.replaceAll('台', '臺');
+        updateLocation(city);
+      }
+    } catch (e) {
+      print("定位更新失敗: $e");
+    }
+  }
+}
+
+class PageIndexNotifier extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void setIndex(int index) {
+    state = index;
+  }
 }
 
 final pageIndexProvider = NotifierProvider<PageIndexNotifier, int>(() {
   return PageIndexNotifier();
 });
-
-class PageIndexNotifier extends Notifier<int> {
-  @override
-  int build() => 0;
-  set state(int value) => super.state = value;
-}
 
 final favoritesProvider = NotifierProvider<FavoritesNotifier, List<String>>(() {
   return FavoritesNotifier();
@@ -80,91 +145,144 @@ final favoritesProvider = NotifierProvider<FavoritesNotifier, List<String>>(() {
 class FavoritesNotifier extends Notifier<List<String>> {
   @override
   List<String> build() => [];
-
-  void toggleFavorite(String cityName) {
-    if (state.contains(cityName)) {
-      state = state.where((item) => item != cityName).toList();
+  void toggleFavorite(String city) {
+    if (state.contains(city)) {
+      state = state.where((item) => item != city).toList();
     } else {
-      state = [...state, cityName];
+      state = [...state, city];
     }
   }
 }
 
-// ----API----
+class CwaWeatherAPI {
+  static const _baseUrl = 'https://opendata.cwa.gov.tw/api/v1/rest/datastore';
+  static const _apiKey = 'CWA-3EB622BD-C545-4762-993A-C87BE1010E33';
 
-final weatherProvider = FutureProvider.family<Weather, LocationState>((ref, loc) async {
-  final dio = Dio();
-  const apiKey = 'fe9bb3ce4e9992e3edf23390035b4070';
+  late Dio _dio;
 
-  try {
-    final responses = await Future.wait([
-      dio.get('https://api.openweathermap.org/data/2.5/forecast?lat=${loc.lat}&lon=${loc.lon}&appid=$apiKey&units=metric&lang=zh_tw'),
-      dio.get('https://api.openweathermap.org/data/2.5/air_pollution?lat=${loc.lat}&lon=${loc.lon}&appid=$apiKey'),
-    ]);
-
-    final forecastData = responses[0].data;
-    final airData = responses[1].data;
-
-    if (forecastData == null || forecastData['list'] == null) throw Exception("無法取得氣象資料");
-
-    final list = forecastData['list'] as List;
-    final current = list[0];
-
-    // 每小時資料處理
-    List<HourlyData> hourly = list.take(12).map((i) {
-      return HourlyData(
-        DateTime.fromMillisecondsSinceEpoch((i['dt'] as int) * 1000),
-        (i['main']['temp'] as num).toDouble(),
-      );
-    }).toList();
-
-    // 未來 5 日處理
-    Map<String, List<double>> dailyTemps = {};
-    Map<String, double> dailyPop = {};
-    for (var item in list) {
-      String date = item['dt_txt'].split(' ')[0];
-      double t = (item['main']['temp'] as num).toDouble();
-      double p = (item['pop'] as num).toDouble();
-      dailyTemps.putIfAbsent(date, () => []).add(t);
-      if (p > (dailyPop[date] ?? 0)) dailyPop[date] = p;
-    }
-
-    List<DailyForecast> weekly = [];
-    var sortedDates = dailyTemps.keys.toList()..sort();
-    for (var date in sortedDates.take(5)) {
-      List<double> temps = dailyTemps[date]!;
-      weekly.add(DailyForecast(
-        day: (date == DateFormat('yyyy-MM-dd').format(DateTime.now())) ? "今天" : _getWeekDay(date),
-        maxTemp: temps.reduce((a, b) => a > b ? a : b),
-        minTemp: temps.reduce((a, b) => a < b ? a : b),
-        rainChance: (dailyPop[date]! * 100).toInt(),
-      ));
-    }
-
-    return Weather(
-      cityName: loc.cityName ?? forecastData['city']['name'] ?? "未知地點",
-      temp: (current['main']['temp'] as num).toDouble(),
-      feelsLike: (current['main']['feels_like'] as num).toDouble(),
-      maxTemp: weekly.isNotEmpty ? weekly[0].maxTemp : 0.0,
-      minTemp: weekly.isNotEmpty ? weekly[0].minTemp : 0.0,
-      description: current['weather'][0]['description'] ?? "無說明",
-      wind: (current['wind']['speed'] as num).toDouble(),
-      pm25: (airData['list'][0]['components']['pm2_5'] as num).toDouble(),
-      humidity: (current['main']['humidity'] as num).toInt(),
-      hourly: hourly,
-      weekly: weekly,
-    );
-  } catch (e) {
-    throw Exception("連線失敗或資料格式錯誤: $e");
+  CwaWeatherAPI() {
+    _dio = Dio(BaseOptions(
+      baseUrl: _baseUrl,
+      connectTimeout: const Duration(milliseconds: 5000),
+      receiveTimeout: const Duration(milliseconds: 3000),
+    ));
   }
+
+  Future<Weather> fetchWeather(String city) async {
+    final formattedCity = city.trim().replaceAll('台', '臺');
+    print("正在請求氣象資料，城市名稱: $formattedCity");
+
+    try {
+      final res = await _dio.get('/F-D0047-091', queryParameters: {
+        'Authorization': _apiKey,
+        'locationName': formattedCity,
+        'format': 'JSON',
+      });
+
+      final records = res.data['records'];
+      if (records == null || records['Locations'] == null || records['Locations'].isEmpty) {
+        throw "找不到資料結構";
+      }
+
+      final List locations = records['Locations'][0]['Location'];
+      final locationData = locations.firstWhere(
+            (l) => l['LocationName'] == formattedCity,
+        orElse: () => throw "在資料集中找不到「$formattedCity」",
+      );
+      final elements = locationData['WeatherElement'] as List;
+
+      // 基本天氣資訊解
+      String temp = _dynamicGetVal(elements, '平均溫度', 'Temperature', 0);
+      String description = _dynamicGetVal(elements, '天氣預報綜合描述', 'WeatherDescription', 0).split('。')[0];
+      String rh = _dynamicGetVal(elements, '平均相對濕度', 'RelativeHumidity', 0);
+      String ws = _dynamicGetVal(elements, '風速', 'WindSpeed', 0);
+
+      String rain = "0";
+      String descFull = _dynamicGetVal(elements, '天氣預報綜合描述', 'WeatherDescription', 0);
+      RegExp rainReg = RegExp(r"降雨機率(\d+)%");
+      if (rainReg.hasMatch(descFull)) {
+        rain = rainReg.firstMatch(descFull)?.group(1) ?? "0";
+      }
+
+      // 每小時預報
+      List<HourlyData> hourly = [];
+      try {
+        final tList = elements.firstWhere((e) => e['ElementName'] == '平均溫度')['Time'] as List;
+        for (int i = 0; i < 6 && i < tList.length; i++) {
+          hourly.add(HourlyData(
+            DateTime.parse(tList[i]['StartTime']),
+            tList[i]['ElementValue'][0]['Temperature'] ?? "N/A",
+            "晴時多雲",
+          ));
+        }
+      } catch (e) { print("每小時預報解析失敗: $e"); }
+
+      // 一週預報
+      List<DailyForecast> weekly = [];
+      try {
+        final maxT = elements.firstWhere((e) => e['ElementName'] == '最高溫度')['Time'] as List;
+        final minT = elements.firstWhere((e) => e['ElementName'] == '最低溫度')['Time'] as List;
+        final descList = elements.firstWhere((e) => e['ElementName'] == '天氣預報綜合描述')['Time'] as List;
+
+        for (int i = 0; i < maxT.length; i++) {
+          String startTime = maxT[i]['StartTime'];
+
+          if (startTime.contains("06:00:00") || startTime.contains("12:00:00")) {
+            DateTime date = DateTime.parse(startTime);
+            String dayRain = "0";
+            String fullDesc = descList[i]['ElementValue'][0]['WeatherDescription'] ?? "";
+
+            Match? match = RegExp(r"降雨機率(\d+)%").firstMatch(fullDesc);
+            dayRain = match?.group(1) ?? "0";
+
+            weekly.add(DailyForecast(
+              day: _getWeekDay(date),
+              maxTemp: maxT[i]['ElementValue'][0]['MaxTemperature'] ?? "--",
+              minTemp: (i < minT.length) ? minT[i]['ElementValue'][0]['MinTemperature'] : "--",
+              rainChance: dayRain,
+            ));
+          }
+          if (weekly.length >= 7) break;
+        }
+      } catch (e) { print("週預報解析詳細錯誤: $e"); }
+
+      return Weather(
+        cityName: formattedCity,
+        temp: temp,
+        description: description,
+        rainChance: rain,
+        humidity: rh,
+        feelsLike: temp,
+        wind: ws,
+        hourly: hourly,
+        weekly: weekly,
+      );
+    } on DioException catch (de) {
+      throw "網路連線失敗: ${de.message}";
+    } catch (e) {
+      print("Debug 解析錯誤: $e");
+      throw "資料解析失敗";
+    }
+  }
+
+  String _dynamicGetVal(List elements, String elementName, String valueKey, int timeIndex) {
+    try {
+      final el = elements.firstWhere((e) => e['ElementName'] == elementName);
+      final val = el['Time'][timeIndex]['ElementValue'][0][valueKey];
+      return val?.toString() ?? "0";
+    } catch (e) {
+      return "0";
+    }
+  }
+}
+
+final weatherProvider = FutureProvider.family<Weather, String>((ref, city) async {
+  return CwaWeatherAPI().fetchWeather(city);
 });
 
-//  UI 組件
+// ----  UI 介面 ----
 
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const ProviderScope(child: MyApp()));
-}
+void main() => runApp(const ProviderScope(child: MyApp()));
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -172,7 +290,10 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: const Color(0xFF08203E)),
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF08203E),
+        appBarTheme: const AppBarTheme(backgroundColor: Colors.transparent, elevation: 0),
+      ),
       home: const MainScaffold(),
     );
   }
@@ -180,7 +301,6 @@ class MyApp extends StatelessWidget {
 
 class MainScaffold extends ConsumerWidget {
   const MainScaffold({super.key});
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final index = ref.watch(pageIndexProvider);
@@ -191,14 +311,8 @@ class MainScaffold extends ConsumerWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            IconButton(
-              icon: const Icon(Icons.menu, color: Colors.white),
-              onPressed: () => ref.read(pageIndexProvider.notifier).state = 1,
-            ),
-            IconButton(
-              icon: const Icon(Icons.search, color: Colors.white),
-              onPressed: () => _showSearchDialog(context, ref),
-            ),
+            IconButton(icon: const Icon(Icons.menu), onPressed: () => ref.read(pageIndexProvider.notifier).state = 1),
+            IconButton(icon: const Icon(Icons.search), onPressed: () => _showSearchDialog(context, ref)),
           ],
         ),
       ),
@@ -210,26 +324,15 @@ class MainScaffold extends ConsumerWidget {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("搜尋城市"),
-        content: TextField(controller: controller, decoration: const InputDecoration(hintText: "英文或中文名稱")),
+        title: const Text("搜尋縣市"),
+        content: TextField(controller: controller, decoration: const InputDecoration(hintText: "例如: 臺中市")),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("取消")),
-          TextButton(
-            onPressed: () async {
-              try {
-                final res = await Dio().get("http://api.openweathermap.org/geo/1.0/direct?q=${controller.text}&limit=1&appid=fe9bb3ce4e9992e3edf23390035b4070");
-                if (res.data.isNotEmpty) {
-                  final d = res.data[0];
-                  ref.read(activeLocationProvider.notifier).updateLocation(
-                      LocationState(lat: d['lat'], lon: d['lon'], cityName: d['local_names']?['zh'] ?? d['name'])
-                  );
-                  ref.read(pageIndexProvider.notifier).state = 0;
-                  Navigator.pop(ctx);
-                }
-              } catch (e) { print(e); }
-            },
-            child: const Text("搜尋"),
-          ),
+          TextButton(onPressed: () {
+            ref.read(activeLocationProvider.notifier).updateLocation(controller.text);
+            ref.read(pageIndexProvider.notifier).state = 0;
+            Navigator.pop(ctx);
+          }, child: const Text("搜尋")),
         ],
       ),
     );
@@ -241,90 +344,170 @@ class HomePage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final loc = ref.watch(activeLocationProvider);
-    final weatherAsync = ref.watch(weatherProvider(loc));
+    final city = ref.watch(activeLocationProvider).cityName;
+    final weatherAsync = ref.watch(weatherProvider(city));
     final favorites = ref.watch(favoritesProvider);
 
     return weatherAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (err, _) => Center(child: Text(err.toString(), textAlign: TextAlign.center)),
-      data: (weather) => Scaffold(
-        backgroundColor: Colors.transparent,
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          leading: IconButton(
-            icon: const Icon(Icons.my_location),
-            onPressed: () async {
-              Position pos = await _determinePosition();
-              ref.read(activeLocationProvider.notifier).updateLocation(
-                  LocationState(lat: pos.latitude, lon: pos.longitude, isGPS: true)
-              );
-            },
-          ),
-          actions: [
-            IconButton(
-              icon: Icon(favorites.contains(weather.cityName) ? Icons.bookmark : Icons.add_circle_outline),
-              onPressed: () {
-                final isRemoving = favorites.contains(weather.cityName);
-                ref.read(favoritesProvider.notifier).toggleFavorite(weather.cityName);
+      loading: () => const Scaffold(body: Center(child: CircularProgressIndicator())),
+      error: (err, _) => Scaffold(body: Center(child: Text("錯誤: $err"))),
+      data: (w) {
+        // 1. 定義視覺與預警邏輯
+        final visual = WeatherVisuals.getVisuals(w.description);
 
-                // 10 秒提醒窗實作
-                ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(isRemoving ? "已移除關注：${weather.cityName}" : "已加入關注：${weather.cityName}"),
-                    duration: const Duration(seconds: 10),
-                    behavior: SnackBarBehavior.floating,
-                    action: SnackBarAction(label: "關閉", onPressed: () {}),
-                  ),
-                );
-              },
+        // 執行降雨預警檢查
+        _scanAllFavoriteCitiesForRain(context, ref, favorites, w);
+
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: visual.bgColors,
             ),
-          ],
-        ),
-        body: SingleChildScrollView(
-          child: Column(
-            children: [
-              const SizedBox(height: 20),
-              Text(weather.cityName, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
-              Text('${weather.temp.toInt()}°', style: const TextStyle(fontSize: 80, fontWeight: FontWeight.w200)),
-              Text(weather.description, style: const TextStyle(fontSize: 20, color: Colors.white70)),
-              _SectionCard(
-                title: '每小時預報',
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(children: weather.hourly.map((h) => _HourlyItem(h)).toList()),
-                ),
-              ),
-              _SectionCard(
-                title: '未來 5 日預報',
-                child: Column(children: weather.weekly.map((w) => _WeeklyRow(w)).toList()),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: GridView.count(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  crossAxisCount: 2,
-                  mainAxisSpacing: 10,
-                  crossAxisSpacing: 10,
-                  childAspectRatio: 2.5,
-                  children: [
-                    _InfoBox(label: '風速', value: '${weather.wind} m/s', icon: Icons.air),
-                    _InfoBox(label: 'PM2.5', value: '${weather.pm25}', icon: Icons.grain),
-                    _InfoBox(label: '濕度', value: '${weather.humidity}%', icon: Icons.water_drop),
-                    _InfoBox(label: '能見度', value: '10 km', icon: Icons.visibility),
-                  ],
-                ),
-              ),
-            ],
           ),
-        ),
-      ),
+          child: Scaffold(
+            backgroundColor: Colors.transparent,
+            appBar: AppBar(
+              leading: IconButton(
+                  icon: const Icon(Icons.my_location),
+                  onPressed: () => _handleGPS(ref, context)
+              ),
+              actions: [
+                IconButton(
+                  icon: Icon(
+                    favorites.contains(w.cityName) ? Icons.bookmark : Icons.add_circle_outline,
+                    color: favorites.contains(w.cityName) ? Colors.yellow : Colors.white,
+                  ),
+                  onPressed: () {
+                    final isFav = favorites.contains(w.cityName);
+                    ref.read(favoritesProvider.notifier).toggleFavorite(w.cityName);
+                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(isFav ? "已移除關注" : "已加入關注：${w.cityName}"),
+                      duration: const Duration(seconds: 2),
+                      behavior: SnackBarBehavior.floating,
+                    ));
+                  },
+                )
+              ],
+            ),
+            body: SingleChildScrollView(
+              child: Column(
+                children: [
+                  const SizedBox(height: 20),
+                  Text(w.cityName, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+
+                  // 顯示對應的天氣圖示
+                  Icon(visual.icon, size: 100, color: Colors.white),
+
+                  Text('${w.temp}°', style: const TextStyle(fontSize: 80, fontWeight: FontWeight.w200)),
+                  Text(w.description, style: const TextStyle(fontSize: 22, color: Colors.white70)),
+
+                  _SectionCard(
+                      title: '每小時預報',
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(children: w.hourly.map((h) => _HourlyItem(h)).toList()),
+                      )
+                  ),
+
+                  _SectionCard(
+                      title: '未來一周預報',
+                      child: Column(children: w.weekly.map((d) => _WeeklyRow(d)).toList())
+                  ),
+
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: GridView.count(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      crossAxisCount: 2,
+                      mainAxisSpacing: 10,
+                      crossAxisSpacing: 10,
+                      childAspectRatio: 2.5,
+                      children: [
+                        _InfoBox(label: '降雨機率', value: '${w.rainChance}%', icon: Icons.umbrella),
+                        _InfoBox(label: '體感溫度', value: '${w.feelsLike}°', icon: Icons.thermostat),
+                        _InfoBox(label: '濕度', value: '${w.humidity}%', icon: Icons.water_drop),
+                        _InfoBox(label: '風速', value: '${w.wind} m/s', icon: Icons.air),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
+
+// 自動掃描所有關注城市的降雨情況
+  void _scanAllFavoriteCitiesForRain(BuildContext context, WidgetRef ref, List<String> favorites, Weather currentCity) {
+    Future.delayed(Duration.zero, () async {
+      List<String> rainWarningList = [];
+
+      if (int.parse(currentCity.rainChance) >= 50) {
+        rainWarningList.add(" ${currentCity.cityName}：${currentCity.rainChance}%");
+      }
+
+      for (String city in favorites) {
+        if (city == currentCity.cityName) continue;
+        try {
+          final weather = await ref.read(weatherProvider(city).future);
+          if (int.parse(weather.rainChance) >= 70) {
+            rainWarningList.add(" ${weather.cityName}：${weather.rainChance}%");
+          }
+        } catch (e) {
+          debugPrint("掃描 $city 失敗");
+        }
+      }
+
+      // 一次顯示
+      if (rainWarningList.isNotEmpty && context.mounted) {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF1A1A2E),
+            title: const Text("🌧️ 降雨彙整提醒", style: TextStyle(color: Colors.white)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text("以下關注(當下)城市降雨機率高，出門記得帶傘：", style: TextStyle(color: Colors.white70)),
+                const SizedBox(height: 15),
+                ...rainWarningList.map((msg) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(msg, style: const TextStyle(color: Colors.lightBlueAccent, fontSize: 18, fontWeight: FontWeight.bold)),
+                )),
+              ],
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("確認")),
+            ],
+          ),
+        );
+      }
+    });
+  }
 }
+
+
+
+  Future<void> _handleGPS(WidgetRef ref, BuildContext context) async {
+    try {
+      Position pos = await Geolocator.getCurrentPosition();
+      final res = await Dio().get('https://nominatim.openstreetmap.org/reverse', queryParameters: {
+        'lat': pos.latitude, 'lon': pos.longitude, 'format': 'json', 'accept-language': 'zh-TW',
+      });
+      String city = res.data['address']['city'] ?? res.data['address']['county'] ?? "臺北市";
+      city = city.replaceAll('台', '臺');
+      ref.read(activeLocationProvider.notifier).updateLocation(city);
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("定位失敗")));
+    }
+  }
 
 class OverviewPage extends ConsumerWidget {
   const OverviewPage({super.key});
@@ -335,7 +518,53 @@ class OverviewPage extends ConsumerWidget {
       appBar: AppBar(title: const Text("關注城鎮"), leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => ref.read(pageIndexProvider.notifier).state = 0)),
       body: favorites.isEmpty
           ? const Center(child: Text("目前無關注城市"))
-          : ListView(children: favorites.map((city) => ListTile(title: Text(city), trailing: const Icon(Icons.chevron_right))).toList()),
+          : ListView.builder(
+        itemCount: favorites.length,
+        itemBuilder: (ctx, i) {
+          final cityName = favorites[i];
+          final weatherAsync = ref.watch(weatherProvider(cityName));
+
+          return Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            color: Colors.white.withOpacity(0.05),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+            child: InkWell(
+              onTap: () {
+                ref.read(activeLocationProvider.notifier).updateLocation(cityName);
+                ref.read(pageIndexProvider.notifier).state = 0;
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(cityName, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        // 更新時間
+                        Text(DateFormat('HH:mm').format(DateTime.now()), style: const TextStyle(color: Colors.white70)),
+                      ],
+                    ),
+                    weatherAsync.when(
+                      data: (w) => Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text('${w.temp}°', style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w300)),
+                          Text(w.description, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                        ],
+                      ),
+                      loading: () => const CircularProgressIndicator(),
+                      error: (_, __) => const Icon(Icons.error),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      )
     );
   }
 }
@@ -346,7 +575,7 @@ class _SectionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.all(16), padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(15)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: const TextStyle(color: Colors.white70)), const Divider(), child]),
     );
@@ -360,19 +589,44 @@ class _HourlyItem extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Column(children: [Text(DateFormat('HH:mm').format(h.time)), const Icon(Icons.cloud), Text('${h.temp.toInt()}°')]),
+      child: Column(children: [
+        Text(DateFormat('HH:mm').format(h.time)),
+        const Icon(Icons.wb_cloudy, size: 20, color: Colors.white70),
+        Text('${h.temp}°'),
+      ]),
     );
   }
 }
 
 class _WeeklyRow extends StatelessWidget {
-  final DailyForecast w;
-  const _WeeklyRow(this.w);
+  final DailyForecast d;
+  const _WeeklyRow(this.d);
+
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(children: [Expanded(child: Text(w.day)), Text('${w.maxTemp.toInt()}° / ${w.minTemp.toInt()}°')]),
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 60,
+            child: Text(d.day, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+          ),
+          const Icon(Icons.water_drop, size: 14, color: Colors.lightBlueAccent),
+          const SizedBox(width: 4),
+          SizedBox(
+            width: 40,
+            child: Text('${d.rainChance}%', style: const TextStyle(color: Colors.white70, fontSize: 13)),
+          ),
+          const Spacer(),
+          Text('${d.minTemp}°', style: const TextStyle(color: Colors.white60, fontSize: 16)),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8),
+            child: Text("/", style: TextStyle(color: Colors.white24)),
+          ),
+          Text('${d.maxTemp}°', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        ],
+      ),
     );
   }
 }
@@ -385,24 +639,18 @@ class _InfoBox extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(10)),
-      child: Row(children: [Icon(icon, size: 16), const SizedBox(width: 8), Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(label, style: const TextStyle(fontSize: 12, color: Colors.white70)), Text(value, style: const TextStyle(fontWeight: FontWeight.bold))])]),
+      child: Row(children: [
+        Icon(icon, size: 18, color: Colors.lightBlueAccent),
+        const SizedBox(width: 8),
+        Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+          Text(label, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+          Text(value, style: const TextStyle(fontWeight: FontWeight.bold)),
+        ])
+      ]),
     );
   }
 }
 
-String _getWeekDay(String date) {
-  return DateFormat('EEEE', 'zh_TW').format(DateTime.parse(date)).replaceAll('星期', '週');
-}
-
-Future<Position> _determinePosition() async {
-  LocationPermission permission = await Geolocator.checkPermission();
-  if (permission == LocationPermission.denied) permission = await Geolocator.requestPermission();
-  return await Geolocator.getCurrentPosition();
-}
-
-class _WeatherChart extends StatelessWidget {
-  final List<HourlyData> data;
-  const _WeatherChart(this.data);
-  @override
-  Widget build(BuildContext context) => const SizedBox.shrink();
+String _getWeekDay(DateTime date) {
+  return DateFormat('EEEE', 'zh_TW').format(date).replaceAll('星期', '週');
 }
